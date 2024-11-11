@@ -375,7 +375,7 @@ def process(burst_path, options=None, custom_params=None):
     
     #### Running the handheld pipeline
     handheld_output, debug_dict = main(ref_raw.astype(DEFAULT_NUMPY_FLOAT_TYPE), raw_comp.astype(DEFAULT_NUMPY_FLOAT_TYPE), options, params)
-    
+    np.save('handheld_output.npy', handheld_output)
     
     #### Performing frame count aware denoising if enabled
     median_params = params['accumulated robustness denoiser']['median']
