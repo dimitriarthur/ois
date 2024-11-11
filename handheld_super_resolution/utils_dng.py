@@ -1,0 +1,337 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar 21 16:44:36 2023
+
+@author: jamyl
+"""
+
+import os
+import glob
+
+import numpy as np
+from pathlib import Path
+import exifread
+import rawpy
+import imageio
+import warnings
+
+from . import raw2rgb
+from .utils import DEFAULT_NUMPY_FLOAT_TYPE
+
+# Paths of exiftool and dng validate. Only necessary to output dng.
+EXIFTOOL_PATH = 'path/to/exiftool.exe'
+DNG_VALIDATE_PATH = 'path/to/dng_validate.exe'
+
+
+# See "PhotometricInterpretation in" https://exiftool.org/TagNames/EXIF.html
+PHOTO_INTER = {
+    0 : 'WhiteIsZero',
+    1 : 'BlackIsZero',
+    2 : 'RGB',
+    3 : 'RGB Palette',
+    4 : 'Transparency Mask',
+    5 : 'CMYK',
+    6 : 'YCbCr',
+    8 : 'CIELab',
+    9 : 'ICCLab',
+    10 : 'ITULab',
+    32803 : 'Color Filter Array',
+    32844 : 'Pixar LogL',
+    32845 : 'Pixar LogLuv',
+    32892 : 'Sequential Color Filter',
+    34892 : 'Linear Raw',
+    51177 : 'Depth Map',
+    52527 : 'Semantic Mask'}
+
+# Supported Photometric Interpretations
+SUPPORTED = [1, 32803]
+
+def load_dng_burst(burst_path):
+    """
+    Loads a dng burst into numpy arrays, and their exif tags.
+
+    Parameters
+    ----------
+    burst_path : Path or str
+        Path of the folder containing the .dngs
+
+    Returns
+    -------
+    ref_raw : numpy Array[H, W]
+        Reference frame
+    raw_comp : numpy Array[n, H, W]
+        Stack of non-reference frame
+    ISO : int
+        Clipped ISO (between 100 and 3600)
+    tags : dict
+        Tags of the reference frame
+    CFA : numpy array [2, 2]
+        Bayer pattern of the stack
+    xyz2cam : Array
+        The xyz to camera color matrix
+    reference_path
+        Path of the reference image.
+
+    """
+    ref_id = 0
+    raw_comp = []
+
+    # This ensures that burst_path is a Path object
+    burst_path = Path(burst_path)
+
+
+    #### Read dng as numpy arrays
+    # Get the list of raw images in the burst path
+    raw_path_list = glob.glob(os.path.join(burst_path.as_posix(), '*.dng'))
+    assert len(raw_path_list) != 0, 'At least one raw .dng file must be present in the burst folder.'
+    # Read the raw bayer data from the DNG files
+    for index, raw_path in enumerate(raw_path_list):
+        with rawpy.imread(raw_path) as rawObject:
+            if index != ref_id:
+
+                raw_comp.append(rawObject.raw_image.copy())  # copy otherwise image data is lost when the rawpy object is closed
+    raw_comp = np.array(raw_comp)
+
+    # Reference image selection and metadata
+    raw = rawpy.imread(raw_path_list[ref_id])
+    ref_raw = raw.raw_image.copy()
+
+
+
+
+    #### Reading tags of the reference image
+    xyz2cam = raw2rgb.get_xyz2cam_from_exif(raw_path_list[ref_id])
+
+    # reading exifs for white level, black leve and CFA
+    with open(raw_path_list[ref_id], 'rb') as raw_file:
+        tags = exifread.process_file(raw_file)
+
+
+    if 'Image PhotometricInterpretation' in tags.keys():
+        photo_inter = tags['Image PhotometricInterpretation'].values[0]
+        if photo_inter not in SUPPORTED:
+            warnings.warn('The input images have a photometric interpretation '\
+                             'of type "{}", but only {} are supprted.'.format(
+                                 PHOTO_INTER[photo_inter], str([PHOTO_INTER[i] for i in SUPPORTED])))
+            
+    else:
+        warnings.warn('PhotometricInterpretation could not be found in image tags. '\
+                     'Please ensure that it is one of {}'.format(str([PHOTO_INTER[i] for i in SUPPORTED])))
+            
+
+    white_level = int(raw.white_level)  # there is only one white level
+    # exifread method is inconsistent because camera manufacters can put
+    # this under many different tags.
+
+    print(white_level)
+
+    black_levels = raw.black_level_per_channel
+
+    print(black_levels)
+
+    white_balance = raw.camera_whitebalance
+
+    print(white_balance)
+
+    CFA = raw.raw_pattern.copy() # copying to ensure contiguity of the array
+    CFA[CFA == 3] = 1 # Rawpy gives channel 3 to the second green channel. Setting both greens to 1
+
+    if 'EXIF ISOSpeedRatings' in tags.keys():
+        ISO = int(str(tags['EXIF ISOSpeedRatings']))
+    elif 'Image ISOSpeedRatings' in tags.keys():
+        ISO = int(str(tags['Image ISOSpeedRatings']))
+    else:
+        raise AttributeError('ISO value could not be found in both EXIF and Image type.')
+
+    # Clipping ISO to 100 from below
+    ISO = max(100, ISO)
+    ISO = min(3200, ISO)
+
+
+
+
+    # #### Performing whitebalance and normalizing into 0, 1
+
+    # if np.issubdtype(type(ref_raw[0, 0]), np.integer):
+    #     # Here do black and white level correction and white balance processing for all image in comp_images
+    #     # Each image in comp_images should be between 0 and 1.
+    #     # ref_raw is a (H,W) array
+    #     ref_raw = ref_raw.astype(DEFAULT_NUMPY_FLOAT_TYPE)
+    #     for i in range(2):
+    #         for j in range(2):
+    #             channel = CFA[i, j]
+    #             ref_raw[i::2, j::2] = (ref_raw[i::2, j::2] - black_levels[channel]) / (white_level - black_levels[channel])
+    #             ref_raw[i::2, j::2] *= white_balance[channel] / white_balance[1]
+
+    #     ref_raw = np.clip(ref_raw, 0.0, 1.0)
+    #     # The division by the green WB value is important because WB may come with integer coefficients instead
+
+    # if np.issubdtype(type(raw_comp[0, 0, 0]), np.integer):
+    #     raw_comp = raw_comp.astype(DEFAULT_NUMPY_FLOAT_TYPE)
+    #     # raw_comp is a (N, H,W) array
+    #     for i in range(2):
+    #         for j in range(2):
+    #             channel = channel = CFA[i, j]
+    #             raw_comp[:, i::2, j::2] = (raw_comp[:, i::2, j::2] - black_levels[channel]) / (white_level - black_levels[channel])
+    #             raw_comp[:, i::2, j::2] *= white_balance[channel] / white_balance[1]
+    #     raw_comp = np.clip(raw_comp, 0., 1.)
+
+    # Assuming `ref_raw` is a flattened 1D array and `CFA` is the color filter array (e.g., [[0,1], [2,1]])
+    # black_levels and white_balance are arrays or lists holding values for each channel
+    # white_level is a scalar value
+
+    # Ensure ref_raw is a float array before processing
+    ref_raw = ref_raw.astype(np.float64)
+
+    num_pixels = len(ref_raw)
+    channels = np.zeros(num_pixels)  # Array to hold the corresponding channel for each pixel
+
+    # Populate channels based on 2D CFA pattern (assuming 2x2 repeating block in the original 2D array)
+    for i in range(num_pixels):
+        row = (i // 4000) % 2  # Replace `width` with the width of the original 2D array
+        col = (i % 4000) % 2
+        channels[i] = CFA[row, col]
+
+    # Perform black/white level correction and white balance for each pixel
+    for i in range(num_pixels):
+        channel = int(channels[i])  # Ensure channel is an integer
+        # ref_raw[i] = (ref_raw[i] - black_levels[channel]) / (white_level - black_levels[channel]) # original
+        ref_raw[i] = (ref_raw[i] - black_levels[channel]) / (white_level/2 - black_levels[channel]/2)
+        ref_raw[i] *= white_balance[channel] / white_balance[1]
+
+
+    # Clip values between 0 and 1
+    ref_raw = np.clip(ref_raw, 0.0, 1.0)
+
+
+    return ref_raw, raw_comp, ISO, tags, CFA, xyz2cam, raw_path_list[ref_id]
+
+
+def save_as_dng(np_img, ref_dng_path, outpath):
+    '''
+    Saves a RGB numpy image as dng.
+    The image is first saved as 16bits tiff, then the extension is swapped
+    to .dng. The metadata are then overwritten using a reference dng, and
+    the final dng is built using dng_validate.
+
+    Requires :
+    - dng_validate (can be found in dng sdk):
+        https://helpx.adobe.com/camera-raw/digital-negative.html#dng_sdk_download
+
+    - exiftool
+        https://exiftool.org/
+
+
+    Based on :
+    https://github.com/gluijk/dng-from-tiff/blob/main/dngmaker.bat
+    https://github.com/antonwolf/dng_stacker/blob/master/dng_stacker.bat
+
+    Parameters
+    ----------
+    np_img : numpy array
+        RGB image
+    rawpy_ref : _rawpy.Rawpy 
+        image containing some relevant tags
+    outpath : Path
+        output save path.
+
+    Returns
+    -------
+    None.
+
+    '''
+    assert np_img.shape[-1] == 3
+
+    np_int_img = np.copy(np_img)  # copying to avoid inplace-overwritting
+    #### Undo White balance and black level
+    # get tags
+    with open(ref_dng_path, 'rb') as raw_file:
+        tags = exifread.process_file(raw_file)
+
+    black_levels = tags['Image BlackLevel']
+    if isinstance(black_levels.values[0], int):
+        black_levels = np.array(black_levels.values)
+    else:  # Sometimes this tag is a fraction object for some reason. It seems that black levels are all integers anyway
+        black_levels = np.array([int(x.decimal()) for x in black_levels.values])
+
+    raw = rawpy.imread(ref_dng_path)
+    white_balance = raw.camera_whitebalance
+
+    # Reverse WB
+    new_white_level = 2**16 - 1
+
+    for c in range(3):
+        np_int_img[:, :, c] /= white_balance[c] / white_balance[1]
+        np_int_img[:, :, c] = np_int_img[:, :, c] * (new_white_level - black_levels[c]) + black_levels[c]
+
+    np_int_img = np.clip(np_int_img, 0, 2**16 - 1).astype(np.uint16)
+
+    #### Saving the image as 16 bits RGB tiff
+    save_as_tiff(np_int_img, outpath)
+
+    tmp_path = outpath.parent / 'tmp.dng'
+
+    # Deleting tmp.dng if it is already existing
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    #### Overwritting the tiff tags with dng tags, and replacing the .tif extension
+    # by .dng
+    cmd = '''
+        {} -n\
+        -IFD0:SubfileType#=0\
+        -IFD0:PhotometricInterpretation#=34892\
+        -SamplesPerPixel#=3\
+        -overwrite_original -tagsfromfile {}\
+        "-all:all>all:all"\
+        -DNGVersion\
+        -DNGBackwardVersion\
+        -ColorMatrix1 -ColorMatrix2\
+        "-IFD0:BlackLevelRepeatDim<SubIFD:BlackLevelRepeatDim"\
+        "-IFD0:CalibrationIlluminant1<SubIFD:CalibrationIlluminant1"\
+        "-IFD0:CalibrationIlluminant2<SubIFD:CalibrationIlluminant2"\
+        "-IFD0:CFARepeatPatternDim<SubIFD:CFARepeatPatternDim"\
+        "-IFD0:CFAPattern2<SubIFD:CFAPattern2"\
+        -AsShotNeutral\
+        "-IFD0:ActiveArea<SubIFD:ActiveArea"\
+        "-IFD0:DefaultScale<SubIFD:DefaultScale"\
+        "-IFD0:DefaultCropOrigin<SubIFD:DefaultCropOrigin"\
+        "-IFD0:DefaultCropSize<SubIFD:DefaultCropSize"\
+        "-IFD0:OpcodeList1<SubIFD:OpcodeList1"\
+        "-IFD0:OpcodeList2<SubIFD:OpcodeList2"\
+        "-IFD0:OpcodeList3<SubIFD:OpcodeList3"\
+         -o {} {}
+        '''.format(EXIFTOOL_PATH, ref_dng_path,
+                   tmp_path.as_posix(),
+                   outpath.with_suffix('.tif').as_posix())
+    os.system(cmd)
+
+    # adding further dng tags
+    cmd = """
+        {} -n -overwrite_original -tagsfromfile {}\
+        "-IFD0:AnalogBalance"\
+        "-IFD0:ColorMatrix1" "-IFD0:ColorMatrix2"\
+        "-IFD0:CameraCalibration1" "-IFD0:CameraCalibration2"\
+        "-IFD0:AsShotNeutral" "-IFD0:BaselineExposure"\
+        "-IFD0:CalibrationIlluminant1" "-IFD0:CalibrationIlluminant2"\
+        "-IFD0:ForwardMatrix1" "-IFD0:ForwardMatrix2"\
+        {}\
+        """.format(EXIFTOOL_PATH, ref_dng_path, tmp_path.as_posix())
+    os.system(cmd)
+
+    # Running DNG_validate
+    cmd = """
+    {} -16 -dng\
+    {}\
+    {}\
+    """.format(DNG_VALIDATE_PATH, outpath.with_suffix('.dng').as_posix(), tmp_path.as_posix())
+    os.system(cmd)
+
+    os.remove(tmp_path)
+
+
+def save_as_tiff(int_im, outpath):
+    # 16 bits uncompressed by default
+    # Imageio is the only module I could find to save 16 bits RGB tiffs without compression (cv2 does LZW).
+    # It is vital to have uncompressed image, because validate_dng cannot work if the tiff is compressed.
+    imageio.imwrite(outpath.with_suffix('.tif').as_posix(), int_im, bigtiff=False)
