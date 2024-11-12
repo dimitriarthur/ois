@@ -34,9 +34,22 @@ from .fast_monte_carlo import run_fast_MC
 from .kernels import estimate_kernels
 from .merge import merge, merge_ref
 from . import raw2rgb
+from dataclasses import dataclass, field
+from typing import List, Dict, Any
 
 NOISE_MODEL_PATH = Path(os.path.dirname(__file__)).parent / 'data' 
-        
+
+@dataclass
+class ImageConfig:
+    CFA: List[List[int]] = field(default_factory=lambda: [[1, 0], [2, 1]])
+    xyz2cam: List[List[float]] = field(default_factory=lambda: [
+        [1.9549, -0.7877, -0.2582],
+        [-0.5724, 1.0121, 0.1917],
+        [-0.1267, -0.011, 0.6621]
+    ])
+    ISO: int = 100
+    ref_path: str = 'Captis/image0.dng'
+    tags: Dict[str, Any] = field(default_factory=dict)
 
 def main(ref_img, comp_imgs, options, params):
     """
