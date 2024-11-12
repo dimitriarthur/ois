@@ -262,8 +262,25 @@ def process(burst_path, options=None, custom_params=None):
                                          options['verbose'] >= 2)
     params = {}
     
-    # reading image stack
-    ref_raw, raw_comp, ISO, tags, CFA, xyz2cam, ref_path = load_dng_burst(burst_path)
+    
+    config = ImageConfig()
+    CFA = config.CFA
+    xyz2cam = config.xyz2cam
+    ISO = config.ISO
+    ref_path = config.ref_path
+
+    with rawpy.imread('/content/Handheld-Multi-Frame-Super-Resolution/Captis/image4.dng') as raw:
+      ref_raw = raw.raw_image
+
+    dng_files = [f for f in os.listdir('/content/Handheld-Multi-Frame-Super-Resolution/Captis') if f.lower().endswith('.dng')]
+    dng_images = {}
+    raw_comp = np.zeros((4, 3000, 4000), dtype=np.uint16)
+    for idx, dng_file in enumerate(dng_files):
+        dng_path = os.path.join('/content/Handheld-Multi-Frame-Super-Resolution/Captis', dng_file)
+        with rawpy.imread(dng_path) as raw:
+            raw_data = raw.raw_image
+            if idx < 4:
+              raw_comp[idx, :, :] = raw_data.astype(np.uint16)
     
     # if the algorithm had to be run on a specific sensor,
     # the precise values of alpha and beta could be used instead
